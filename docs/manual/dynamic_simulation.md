@@ -125,12 +125,9 @@ The dynamic behaviour is described by four CSV (or Parquet) files, declared
 under `dynamic.input_files`. CSV delimiters are sniffed, so `,`, `;` and tab are
 all accepted. The required columns of all four tables are validated up front.
 
-Values are checked only where a typo would otherwise be swallowed: the
-`category_name` of `automation_systems`, the `event_name` of `events` and the
-`type` of `variables` are matched against the accepted sets, and a bad one is
-reported alongside them. Everything else (`model_name`, `static_id`, `model_id`
-and the `category_name` of `static_element_dynamic_models`) is handed to Dynawo
-as written and can only fail there, as a failed model instantiation.
+Local checks cover non-empty structural identifiers, recognized categories and
+the `params` serialization syntax, including duplicate and unknown keys. Model
+references and parameter value semantics are handed to pypowsybl/Dynawo.
 
 ### `static_element_dynamic_models_file`
 
@@ -164,7 +161,7 @@ they carry their own identifier and a free-form parameter string.
 | `params` | `key1=value1;key2=value2;…`, with keys that depend on the category |
 | `model_name` | Dynawo model name, e.g. `UnderVoltage` |
 
-Accepted `category_name` values and the `params` keys each one expects:
+Recognized `category_name` values and the `params` keys each one expects:
 
 | `category_name` | `params` keys |
 | --- | --- |
@@ -182,9 +179,8 @@ Accepted `category_name` values and the `params` keys each one expects:
     column only expresses flat `key=value` scalars. There is no convention yet
     for describing a DataFrame in it.
 
-    The category is still *accepted* by the input validation, so a row using it
-    passes the up-front checks and then fails further down. Supporting it means
-    first fixing a serialisation convention for those columns.
+    Input validation rejects this category before output setup. Supporting it
+    means first fixing a serialisation convention for those columns.
 
 ```csv
 category_name,dynamic_model_id,parameter_set_id,params,model_name
@@ -707,14 +703,14 @@ reports neither:
 | Symptom | Cause |
 | --- | --- |
 | `Dynawo backend unavailable: …` | No `~/.itools/config.yml`, no `dynawo.homeDir` entry, or `homeDir` does not contain `dynawo.sh` / `bin/dynawo` |
-| `Dynamic simulations require network.reader='powsybl'` | Set `reader: powsybl` in the `network` block |
+| `dynamic.dynamic_solver='dynawo' is incompatible with network.reader='native'` | The current dynamic pipeline requires the PowSyBl network representation; set `reader: powsybl` |
 | `Dynawo failed to instantiate N dynamic model(s)` | A `static_id`, `model_name` or `category_name` does not match the network's element IDs or a Dynawo model. Check the IDs against the network file, not against `get_*()` output |
 | `variables: no row of type 'Curve'` | The time-series store needs at least one `Curve` row |
 | `automation_systems: unsupported category_name …` | Typo in a key column; the message lists the accepted values |
-| `dynamic.solver_parameters: missing required key(s)` | `start_time` / `stop_time` are mandatory |
-| `Error in dynamic chunk: …` on every chunk | A per-worker setup step failed identically everywhere, most often a bad key in `dynamic.solver_parameters` or `dynamic.loadflow_parameters`. The message carries the underlying error |
+| `dynamic.solver_parameters.start_time: Field required` (or `stop_time`) | Both simulation-window bounds are mandatory |
+| `Error in dynamic chunk: …` on every chunk | A runtime or backend-initialisation step failed identically in every worker. The message carries the underlying error |
 | `Dynamic generation produced no samples: every scenario failed` | Read `raw/error.log` for the per-scenario cause, and the `Error in dynamic chunk` lines above it for worker-level ones. No reports are written in this case, since `raw/dynamic/` is never created |
-| Trajectory looks like the base case | Check that `events.csv` `start_time` falls inside `[start_time, stop_time]` |
+| `events.start_time must …` | An event time is non-finite or outside the configured simulation window; the message lists its row and value |
 
 ## Current limitations
 

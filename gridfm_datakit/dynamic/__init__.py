@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-import pandas as pd
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 from gridfm_datakit.utils.param_handler import NestedNamespace
 
@@ -66,6 +67,31 @@ VARIABLES_REQUIRED_COLS = {
     "type",  # str; either "Curve" for timeseries or "FinalStateValue" for the final state value only
     "model_id",  # str; identifier of the monitored element
     "variables",  # str; one variable per row; repeat model_id to monitor several (check the Dynawo dynamic model's description for the variables it exposes)
+}
+
+_STATIC_ELEMENT_DYNAMIC_MODELS_NON_EMPTY_COLS = {
+    "category_name",
+    "static_id",
+    "parameter_set_id",
+    "model_name",
+}
+
+_AUTOMATION_SYSTEMS_NON_EMPTY_COLS = {
+    "category_name",
+    "dynamic_model_id",
+    "parameter_set_id",
+    "model_name",
+}
+
+_EVENTS_NON_EMPTY_COLS = {
+    "event_name",
+    "static_id",
+}
+
+_VARIABLES_NON_EMPTY_COLS = {
+    "type",
+    "model_id",
+    "variables",
 }
 
 
@@ -150,7 +176,8 @@ def load_raw_inputs(
 
     Reads the four CSV (or Parquet) files listed under config.dynamic and
     returns a DynamicInputs instance. When dynamic_solver == "dynawo", the
-    minimum required columns for each DataFrame are validated.
+    minimum required columns and non-empty string values for each DataFrame are
+    validated.
 
     Args
     ----
@@ -172,8 +199,9 @@ def load_raw_inputs(
     FileNotFoundError
         If any of the four input files is missing.
     ValueError
-        If required columns are absent from a DataFrame, if a key column holds an
-        unsupported value, or if the variables table declares no "Curve" row
+        If required columns or values are absent from a DataFrame, if a key
+        column holds an unsupported value, if a parameter string violates its
+        category's contract, or if the variables table declares no "Curve" row
         (Dynawo solver only).
     TypeError
         If any of the input files is not of CSV or Parquet format.
@@ -213,6 +241,26 @@ def load_raw_inputs(
         dynamic_models = [_normalize_dtypes(df) for df in dynamic_models]
         events = _normalize_dtypes(events)
         variables = _normalize_dtypes(variables)
+        _check_non_empty_values(
+            dynamic_models[0],
+            _STATIC_ELEMENT_DYNAMIC_MODELS_NON_EMPTY_COLS,
+            "static_element_dynamic_models",
+        )
+        _check_non_empty_values(
+            dynamic_models[1],
+            _AUTOMATION_SYSTEMS_NON_EMPTY_COLS,
+            "automation_systems",
+        )
+        _check_non_empty_values(
+            events,
+            _EVENTS_NON_EMPTY_COLS,
+            "events",
+        )
+        _check_non_empty_values(
+            variables,
+            _VARIABLES_NON_EMPTY_COLS,
+            "variables",
+        )
         _validate_dynawo_values(dynamic_models[1], events, variables)
 
     return DynamicInputs(
@@ -244,6 +292,35 @@ _STRING_COLS = {
 }
 
 
+def _parse_parameter_string(params: str) -> dict[str, str]:
+    """Parse a flat dynamic-input parameter string.
+
+    Args:
+        params: Semicolon-separated ``key=value`` pairs. A trailing semicolon
+            is accepted, and values may themselves contain ``=``.
+
+    Returns:
+        Parameter values keyed by their names.
+
+    Raises:
+        ValueError: If a non-empty fragment is malformed, a key is empty, or a
+            key occurs more than once.
+    """
+    parsed = {}
+    for fragment in params.split(";"):
+        if fragment == "":
+            continue
+        if "=" not in fragment:
+            raise ValueError(f"parameter fragment {fragment!r} must use key=value")
+        key, value = fragment.split("=", 1)
+        if key == "":
+            raise ValueError("parameter keys must not be empty")
+        if key in parsed:
+            raise ValueError(f"parameter {key!r} is specified more than once")
+        parsed[key] = value
+    return parsed
+
+
 def _normalize_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     """Coerce ID/name columns to str and ``start_time`` to float in place.
 
@@ -256,6 +333,37 @@ def _normalize_dtypes(df: pd.DataFrame) -> pd.DataFrame:
         elif col == "start_time":
             df[col] = pd.to_numeric(df[col], errors="raise").astype(float)
     return df
+
+
+def _check_non_empty_values(
+    df: pd.DataFrame,
+    columns: set[str],
+    file_label: str,
+) -> None:
+    """Reject empty required string values in a normalized input table.
+
+    Args:
+        df: Normalized input table.
+        columns: String columns whose values must not be empty.
+        file_label: Input-table name used in diagnostics.
+
+    Raises:
+        ValueError: If a required value is empty or contains only whitespace.
+    """
+    empty_rows = {
+        column: df.index[df[column].str.strip().eq("")].tolist()
+        for column in sorted(columns)
+        if df[column].str.strip().eq("").any()
+    }
+    if not empty_rows:
+        return
+
+    details = ", ".join(
+        f"{column} row(s) {rows}" for column, rows in empty_rows.items()
+    )
+    raise ValueError(
+        f"{file_label}: required values must not be empty: {details}.",
+    )
 
 
 def _validate_dynawo_values(
@@ -283,6 +391,7 @@ def _validate_dynawo_values(
     from gridfm_datakit.dynamic.dynawo.utils import (
         AUTOMATION_SYSTEM_PARAMS_MAPPING,
         EVENT_PARAMS_MAPPING,
+        UNSUPPORTED_CSV_AUTOMATION_SYSTEMS,
         VARIABLE_TYPES,
     )
 
@@ -305,6 +414,34 @@ def _validate_dynawo_values(
     _check_values(events, "event_name", EVENT_PARAMS_MAPPING, "events")
     _check_values(variables, "type", VARIABLE_TYPES, "variables")
 
+    unsupported_rows = automation_systems[
+        automation_systems["category_name"].isin(
+            UNSUPPORTED_CSV_AUTOMATION_SYSTEMS,
+        )
+    ]
+    if not unsupported_rows.empty:
+        categories = sorted(set(unsupported_rows["category_name"]))
+        rows = list(unsupported_rows.index)
+        raise ValueError(
+            "automation_systems: categories "
+            f"{categories} cannot be configured from the flat params column; "
+            "they require DataFrame-valued parameters. "
+            f"Offending rows: {rows}.",
+        )
+
+    _validate_parameter_rows(
+        automation_systems,
+        kind_column="category_name",
+        parameter_mapping=AUTOMATION_SYSTEM_PARAMS_MAPPING,
+        file_label="automation_systems",
+    )
+    _validate_parameter_rows(
+        events,
+        kind_column="event_name",
+        parameter_mapping=EVENT_PARAMS_MAPPING,
+        file_label="events",
+    )
+
     # The dynamic time-series store is built from "Curve" rows only. With none, the
     # simulation runs, monitors nothing, and returns an empty curves frame, which
     # would otherwise blow up the Zarr writer with an opaque ZeroDivisionError.
@@ -313,6 +450,49 @@ def _validate_dynawo_values(
             "variables: no row of type 'Curve'. The dynamic results store is built "
             "from Curve rows, so at least one is required.",
         )
+
+
+def _validate_parameter_rows(
+    df: pd.DataFrame,
+    *,
+    kind_column: str,
+    parameter_mapping: dict[str, list[str]],
+    file_label: str,
+) -> None:
+    """Validate the serialization and keys of each parameter string.
+
+    This validates only what must be resolved before mapping: the local
+    ``key=value`` syntax, duplicate keys, and keys that the adapter would
+    otherwise silently discard. Whether required keys are present and whether
+    their values are meaningful is delegated to pypowsybl/Dynawo.
+
+    Args:
+        df: Normalized input table.
+        kind_column: Column selecting the parameter contract for a row.
+        parameter_mapping: Recognized parameter names for each supported kind.
+        file_label: Input-table name used in diagnostics.
+
+    Raises:
+        ValueError: If a parameter string is malformed, contains duplicate
+            keys, or contains keys the adapter cannot forward.
+    """
+    for row_index, row in df.iterrows():
+        kind = row[kind_column]
+        try:
+            parsed = _parse_parameter_string(row["params"])
+        except ValueError as exc:
+            raise ValueError(
+                f"{file_label} row {row_index!r} ({kind_column}={kind!r}): "
+                f"invalid params: {exc}",
+            ) from exc
+
+        expected = set(parameter_mapping[kind])
+        unexpected = sorted(set(parsed) - expected)
+        if unexpected:
+            raise ValueError(
+                f"{file_label} row {row_index!r} ({kind_column}={kind!r}): "
+                f"invalid params: unexpected parameter(s) {unexpected}",
+            )
 
 
 def _check_cols(df: pd.DataFrame, required: set[str], file_label: str) -> None:

@@ -292,3 +292,74 @@ def test_dynamic_event_times_accept_both_window_boundaries(
     dynamic_inputs.events["start_time"] = [start_time, stop_time]
 
     gd._validate_event_time_window(config_ieee14, dynamic_inputs)
+
+
+@pytest.mark.parametrize("case", ["unknown-event-param", "unsupported-automation"])
+def test_dynamic_params_are_checked_before_overwrite(
+    config_ieee14: NestedNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    if case == "unknown-event-param":
+        table_path = Path(config_ieee14.dynamic.input_files.events_file)
+        table = pd.read_csv(table_path)
+        table.loc[0, "event_name"] = "ActivePowerVariation"
+        table.loc[0, "params"] = "delta_p=0.2;typo=0"
+        match = "unexpected parameter"
+    else:
+        table_path = Path(
+            config_ieee14.dynamic.input_files.automation_systems_file,
+        )
+        table = pd.read_csv(table_path)
+        table.loc[0, "category_name"] = "TapChangerBlocking"
+        table.loc[0, "params"] = (
+            "rfo_df=one;mp1_df=one;mp2_df=one;mp3_df=one;mp4_df=one;mp5_df=one"
+        )
+        match = "cannot be configured from the flat params column"
+    table.to_csv(table_path, index=False)
+    marker = _create_existing_output(config_ieee14.to_dict())
+
+    monkeypatch.setattr(
+        "gridfm_datakit.dynamic.dynawo.api.check_dynawo_available",
+        lambda: None,
+    )
+
+    with pytest.raises(ValueError, match=match):
+        generate_dynamic_data(config_ieee14)
+
+    assert marker.read_text() == "must survive validation failure"
+
+
+@pytest.mark.parametrize(
+    ("input_file", "column"),
+    [
+        ("static_element_dynamic_models_file", "static_id"),
+        ("automation_systems_file", "dynamic_model_id"),
+        ("events_file", "static_id"),
+        ("variables_file", "model_id"),
+    ],
+)
+def test_empty_dynamic_input_values_are_checked_before_overwrite(
+    config_ieee14: NestedNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    input_file: str,
+    column: str,
+) -> None:
+    table_path = Path(getattr(config_ieee14.dynamic.input_files, input_file))
+    table = pd.read_csv(table_path)
+    table.loc[0, column] = "   "
+    table.to_csv(table_path, index=False)
+    marker = _create_existing_output(config_ieee14.to_dict())
+
+    monkeypatch.setattr(
+        "gridfm_datakit.dynamic.dynawo.api.check_dynawo_available",
+        lambda: None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"required values must not be empty: .*{column} row\(s\) \[0\]",
+    ):
+        generate_dynamic_data(config_ieee14)
+
+    assert marker.read_text() == "must survive validation failure"
