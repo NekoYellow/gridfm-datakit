@@ -23,12 +23,10 @@ gridfm-datakit generate path/to/config.yaml
 
 Refer to the sections [Network](network.md), [Load Scenarios](load_scenarios.md), and [Topology perturbations](topology_perturbations.md) for a description of the configuration parameters.
 
-The example and remaining sections on this page describe static generation. A
-top-level `dynamic:` block selects the time-domain pipeline, but dynamic
-generation also requires backend-specific network and settings values. Use the
-complete example in [Dynamic Simulation](dynamic_simulation.md) rather than
-adding the block directly to the static example below; both pipelines use the
-same `generate` command.
+The example below describes static generation. A top-level `dynamic:` block
+selects the time-domain pipeline, which requires its own network and settings
+values; see [Dynamic Simulation](dynamic_simulation.md) for a complete example.
+Both pipelines use the same `generate` command.
 
 To read the grid or solve the power flow with PowSyBl, see [PowSyBl](powsybl.md).
 

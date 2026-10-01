@@ -125,10 +125,6 @@ The dynamic behaviour is described by four CSV (or Parquet) files, declared
 under `dynamic.input_files`. CSV delimiters are sniffed, so `,`, `;` and tab are
 all accepted. The required columns of all four tables are validated up front.
 
-Local checks cover non-empty structural identifiers, recognized categories and
-the `params` serialization syntax, including duplicate and unknown keys. Model
-references and parameter value semantics are handed to pypowsybl/Dynawo.
-
 ### `static_element_dynamic_models_file`
 
 One row per network element to equip with a dynamic model. Elements not listed
@@ -214,9 +210,8 @@ Disconnect,_GEN____2_SM,50,disconnect_only=;
 ```
 
 `start_time` must lie inside the `[start_time, stop_time]` window of
-`dynamic.solver_parameters`. Non-finite or out-of-window event times are
-rejected before output setup; otherwise Dynawo can silently run without firing
-the intended disturbance.
+`dynamic.solver_parameters`. Non-finite or out-of-window values are rejected
+before output setup.
 
 ### `variables_file`
 
@@ -277,11 +272,9 @@ example input tables reference a subset of those; `Network` and
 
 ## Configuration
 
-The full mapping is parsed by `validate_dynamic_config` before the output tree
-is created or replaced. Validation is strict: unknown keys and values of the
-wrong type are rejected rather than coerced. The four input tables are then
-loaded and checked before output setup as well, so a missing or malformed table
-cannot delete an earlier run when `settings.overwrite: true`.
+The configuration and four input tables are validated before output setup, so
+invalid input cannot delete an earlier run when `settings.overwrite: true`.
+Unknown keys and values of the wrong type are rejected rather than coerced.
 
 ### `dynamic.solver_parameters`
 
@@ -298,14 +291,10 @@ is optional and is passed through to the Dynawo provider:
 | `solver_parameters_id` | `solver.parametersId` |
 | `precision` | `precision` |
 
-A missing required key or an unsupported one is rejected, naming its full
-configuration path. Any optional provider value, including `solver_type` and
-`precision`, may be set to the string `none`; it is then dropped rather than
-forwarded. Empty strings are rejected.
-
-`stop_time` must be greater than `start_time`; when `precision` is numeric, it
-must be positive. All numeric values must be finite. The lower-level Dynawo
-parameter builders retain their own checks for callers that use them directly.
+Errors name the full configuration path. Optional provider values may use the
+string `none`, which is omitted rather than forwarded; empty strings are
+rejected. `stop_time` must exceed `start_time`, numeric `precision` must be
+positive, and numeric values must be finite.
 
 ### `dynamic.loadflow_parameters` (optional)
 
@@ -352,20 +341,14 @@ maps onto the same level as `error`.
 
 ### Settings that behave differently
 
-The dynamic schema shares the execution fields used by static generation, but
-only accepts the values the dynamic pipeline actually implements:
+The dynamic schema only accepts settings the pipeline implements:
 
 - `settings.large_chunk_size` bounds peak memory: a chunk is written and
   released before the next runs. Dynamic curves are far larger than static
   snapshots, so this matters more here than in the static pipeline.
-- `settings.mode` must be `pf`; the stored initial-state snapshot is a power-flow
-  result.
-- `settings.include_dc_res`, `settings.pf_fast` and `settings.dcpf_fast` must be
-  `false`; the dynamic pipeline does not execute those static fast/DC paths.
-- `settings.pf_solver` must be `powsybl`: OPF is always PowerModels and the
-  balanced initial-state AC power flow is always OpenLoadFlow.
-- `settings.opf_formulation` currently remains `polar`, matching the formulation
-  used by dynamic workers.
+- `settings.mode`, `settings.pf_solver` and `settings.opf_formulation` must be
+  `pf`, `powsybl` and `polar`, respectively. `settings.include_dc_res`,
+  `settings.pf_fast` and `settings.dcpf_fast` must be `false`.
 - `settings.enable_solver_logs` routes OPF/PF **and** Dynawo's native output
   (OpenModelica banners, solver iterations) to `raw/solver_log/`. Turning it on
   also raises the Julia solver verbosity to DEBUG, which un-silences
@@ -378,8 +361,7 @@ only accepts the values the dynamic pipeline actually implements:
   is rejected rather than silently writing somewhere unexpected.
 
 `settings.num_processes` and `settings.large_chunk_size` default to `1` and
-`1000`, respectively, so sequential callers do not need distributed tuning
-fields. Optional perturbation blocks default to `type: none`.
+`1000`; optional perturbation blocks default to `type: none`.
 
 ### Full example
 
