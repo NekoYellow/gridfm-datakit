@@ -218,7 +218,9 @@ Disconnect,_GEN____2_SM,50,disconnect_only=;
 ```
 
 `start_time` must lie inside the `[start_time, stop_time]` window of
-`dynamic.solver_parameters`, otherwise the event never fires.
+`dynamic.solver_parameters`. Non-finite or out-of-window event times are
+rejected before output setup; otherwise Dynawo can silently run without firing
+the intended disturbance.
 
 ### `variables_file`
 
@@ -279,6 +281,12 @@ example input tables reference a subset of those; `Network` and
 
 ## Configuration
 
+The full mapping is parsed by `validate_dynamic_config` before the output tree
+is created or replaced. Validation is strict: unknown keys and values of the
+wrong type are rejected rather than coerced. The four input tables are then
+loaded and checked before output setup as well, so a missing or malformed table
+cannot delete an earlier run when `settings.overwrite: true`.
+
 ### `dynamic.solver_parameters`
 
 `start_time` and `stop_time` (both in seconds) are **required**. Every other key
@@ -294,16 +302,14 @@ is optional and is passed through to the Dynawo provider:
 | `solver_parameters_id` | `solver.parametersId` |
 | `precision` | `precision` |
 
-A missing required key or an unsupported one is rejected, naming the accepted
-set. Values of `none` or `""` are dropped rather than forwarded.
+A missing required key or an unsupported one is rejected, naming its full
+configuration path. Any optional provider value, including `solver_type` and
+`precision`, may be set to the string `none`; it is then dropped rather than
+forwarded. Empty strings are rejected.
 
-!!! note "These parameters are validated inside the workers"
-    Unlike the Dynawo availability check, `dynamic.solver_parameters` and
-    `dynamic.loadflow_parameters` are only built once a worker starts. A bad key
-    therefore fails every chunk: the parent logs
-    `Error in dynamic chunk: dynamic.solver_parameters: unsupported key(s) …`
-    and the run ends with `Dynamic generation produced no samples`. The first
-    message is the one that names the offending key.
+`stop_time` must be greater than `start_time`; when `precision` is numeric, it
+must be positive. All numeric values must be finite. The lower-level Dynawo
+parameter builders retain their own checks for callers that use them directly.
 
 ### `dynamic.loadflow_parameters` (optional)
 
@@ -350,16 +356,20 @@ maps onto the same level as `error`.
 
 ### Settings that behave differently
 
-The `settings:` block is the static one, with these caveats:
+The dynamic schema shares the execution fields used by static generation, but
+only accepts the values the dynamic pipeline actually implements:
 
 - `settings.large_chunk_size` bounds peak memory: a chunk is written and
   released before the next runs. Dynamic curves are far larger than static
   snapshots, so this matters more here than in the static pipeline.
-- `settings.include_dc_res` is not honoured; the dynamic pipeline never computes
-  DC results.
-- `settings.pf_solver`, `settings.pf_fast` and `settings.dcpf_fast` are inert:
-  OPF is always PowerModels and the initial-state AC power flow is always
-  OpenLoadFlow.
+- `settings.mode` must be `pf`; the stored initial-state snapshot is a power-flow
+  result.
+- `settings.include_dc_res`, `settings.pf_fast` and `settings.dcpf_fast` must be
+  `false`; the dynamic pipeline does not execute those static fast/DC paths.
+- `settings.pf_solver` must be `powsybl`: OPF is always PowerModels and the
+  balanced initial-state AC power flow is always OpenLoadFlow.
+- `settings.opf_formulation` currently remains `polar`, matching the formulation
+  used by dynamic workers.
 - `settings.enable_solver_logs` routes OPF/PF **and** Dynawo's native output
   (OpenModelica banners, solver iterations) to `raw/solver_log/`. Turning it on
   also raises the Julia solver verbosity to DEBUG, which un-silences
@@ -370,6 +380,10 @@ The `settings:` block is the static one, with these caveats:
 - `dynamic.output_dir` **no longer exists**. Outputs are rooted at
   `settings.data_dir` like the static pipeline; a config still carrying the key
   is rejected rather than silently writing somewhere unexpected.
+
+`settings.num_processes` and `settings.large_chunk_size` default to `1` and
+`1000`, respectively, so sequential callers do not need distributed tuning
+fields. Optional perturbation blocks default to `type: none`.
 
 ### Full example
 

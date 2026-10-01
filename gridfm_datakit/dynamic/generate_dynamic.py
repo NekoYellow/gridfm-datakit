@@ -40,10 +40,14 @@ from typing import Any, Dict, List, Union
 
 import numpy as np
 import pandas as pd
-import yaml
 
-from gridfm_datakit.dynamic import load_raw_inputs
-from gridfm_datakit.generate import _prepare_network_and_scenarios, _setup_environment
+from gridfm_datakit.config import validate_dynamic_config
+from gridfm_datakit.dynamic import DynamicInputs, load_raw_inputs
+from gridfm_datakit.generate import (
+    _load_config,
+    _prepare_network_and_scenarios,
+    _setup_generation_environment,
+)
 from gridfm_datakit.process.solver_output import SolverVerbosity
 from gridfm_datakit.utils.column_names import (
     BRANCH_COLUMNS,
@@ -111,12 +115,11 @@ def generate_dynamic_data(
     dictionnary or a NestedNamespace.
 
     Runs the full pipeline:
-    1. Validate config.
+    1. Validate config and dynamic input tables.
     2. Prepare network + load scenarios.
-    3. Load and prepare Dynawo mappings.
-    4. Build solver parameters.
-    5. Run distributed dynamic simulations.
-    6. Save static (Parquet) + dynamic (Zarr) outputs.
+    3. Prepare Dynawo mappings and solver parameters in each worker.
+    4. Run distributed dynamic simulations.
+    5. Save static (Parquet) + dynamic (Zarr) outputs.
 
     Args
     ----
@@ -139,30 +142,35 @@ def generate_dynamic_data(
     TypeError
         If ``config`` is none of the accepted forms.
     ValueError
-        If ``network.reader != "powsybl"``, the ``dynamic`` block or
-        ``dynamic.dynamic_solver`` is missing, ``load.scenarios`` is below 1, or
-        the removed ``dynamic.output_dir`` key is still present.
+        If the configuration contains missing, invalid, incompatible, or unknown
+        values.
     RuntimeError
         If no sample survived, i.e. every scenario failed.
     """
 
     # --- Step 0: load and validate config ---
-    args = _load_config(config)
-
-    _validate_dynamic_config(args)
+    config = _load_config(config)
+    config = validate_dynamic_config(config)
+    args = NestedNamespace(**config)
+    _check_dynamic_runtime(args)
     _configure_logging(args)
 
+    # Dynamic input tables are part of the run's configuration contract. Load
+    # and validate them before environment setup can remove an existing output
+    # tree, so a missing file or malformed table is non-destructive.
+    dynamic_inputs = load_raw_inputs(args)
+    _validate_event_time_window(args, dynamic_inputs)
+
     # --- Step 1: standard environment setup (reuse generate.py logic) ---
-    args, base_path, file_paths, seed = _setup_environment(args)
-    # _setup_environment derives solver_log_dir (honouring enable_solver_logs)
+    args, base_path, file_paths, seed = _setup_generation_environment(args)
+    # Environment setup derives solver_log_dir (honouring enable_solver_logs)
     # into file_paths; publish it on settings so the distributed dynamic loop
-    # (which reads config.settings.solver_log_dir) routes OPF + Dynawo native
-    # output to files instead of dropping it.
+    # routes OPF + Dynawo native output to files instead of dropping it.
     args.settings.solver_log_dir = file_paths["solver_log_dir"]
 
     # The dynamic pipeline reports progress per chunk through the
-    # "gridfm_datakit.dynamic" logger, not tqdm, so _setup_environment's tqdm.log
-    # stays empty and is not exported.
+    # "gridfm_datakit.dynamic" logger, not tqdm, so the environment setup's
+    # tqdm.log stays empty and is not exported.
     #
     # It is only deleted when settings.overwrite is set: base_path has then just
     # been wiped and recreated, so the file there is certainly ours. Otherwise
@@ -177,10 +185,7 @@ def generate_dynamic_data(
     # reload the network themselves from that path (see _process_dynamic_chunk).
     _, scenarios, meta = _prepare_network_and_scenarios(args, file_paths, seed)
 
-    # --- Step 3: dynamic inputs ---
-    dynamic_inputs = load_raw_inputs(args)
-
-    # --- Step 4: output directory ---
+    # --- Step 3: output directory ---
     # Single root: everything this run produces lives under settings.data_dir, in
     # the same base_path (data_dir/<network>/raw) the static pipeline uses for its
     # logs and scenarios. The dynamic artifacts go one level down, in dynamic/,
@@ -193,7 +198,7 @@ def generate_dynamic_data(
     dynamic_solver = args.dynamic.dynamic_solver
     output_dir = Path(base_path) / "dynamic"
 
-    # --- Steps 5 & 6: simulate and save, one chunk at a time ---
+    # --- Steps 3 to 5: prepare, simulate, and save one chunk at a time ---
     # Each chunk is written and released before the next runs, so peak memory
     # tracks settings.large_chunk_size rather than the whole dataset. Dynamic
     # curves are far larger than static snapshots, which is why this streams
@@ -215,7 +220,7 @@ def generate_dynamic_data(
         gc.collect()
     writer.close()
 
-    # --- Step 7: optional validation ---
+    # --- Step 6: optional validation ---
     _validate_outputs(args, file_paths)
 
     return file_paths
@@ -246,87 +251,48 @@ def _validate_outputs(args: NestedNamespace, file_paths: Dict[str, str]) -> None
     logger.info("Validation passed.")
 
 
-def _load_config(
-    config: Union[str, os.PathLike, Dict[str, Any], NestedNamespace],
-) -> NestedNamespace:
-    """Normalise every accepted config form into a NestedNamespace.
+def _check_dynamic_runtime(args: NestedNamespace) -> None:
+    """Check runtime dependencies required by the validated dynamic backend."""
+    # pypowsybl.dynamic imports without a Dynawo install, so otherwise a missing
+    # installation only surfaces after worker processes have started.
+    from gridfm_datakit.dynamic.dynawo.api import check_dynawo_available
 
-    Anything else is refused here rather than carried into the pipeline, where it
-    used to surface as an AttributeError on the object itself.
-    """
-    if isinstance(config, NestedNamespace):
-        return config
-    if isinstance(config, (str, os.PathLike)):
-        with open(config, "r") as f:
-            config = yaml.safe_load(f)
-        if not isinstance(config, dict):
-            raise ValueError(
-                f"Config file must contain a YAML mapping (network:, load:, "
-                f"dynamic:, settings:), got {type(config).__name__}.",
-            )
-    if isinstance(config, dict):
-        return NestedNamespace(**config)
-    raise TypeError(
-        f"generate_dynamic_data expects a path to a YAML config (str or "
-        f"os.PathLike), a dict, or a NestedNamespace, got "
-        f"{type(config).__name__}.",
+    check_dynawo_available()
+
+
+def _validate_event_time_window(
+    args: NestedNamespace,
+    dynamic_inputs: DynamicInputs,
+) -> None:
+    """Require every dynamic event to occur within the simulation window."""
+    events = dynamic_inputs.events
+    event_times = events["start_time"].to_numpy(dtype="float64")
+    finite = np.isfinite(event_times)
+    if not finite.all():
+        invalid = ", ".join(
+            f"{row!r}={float(value)!r}"
+            for row, value in zip(events.index[~finite], event_times[~finite])
+        )
+        raise ValueError(
+            "events.start_time must contain only finite values; invalid "
+            f"row/value pairs: {invalid}",
+        )
+
+    solver_parameters = args.dynamic.solver_parameters
+    start_time = solver_parameters.start_time
+    stop_time = solver_parameters.stop_time
+    in_window = (event_times >= start_time) & (event_times <= stop_time)
+    if in_window.all():
+        return
+
+    invalid = ", ".join(
+        f"{row!r}={float(value)!r}"
+        for row, value in zip(events.index[~in_window], event_times[~in_window])
     )
-
-
-def _validate_dynamic_config(args: NestedNamespace) -> None:
-    """Raise ValueError for config issues that would cause silent failures."""
-
-    # getattr on the block too: a config with no network: block must report the
-    # missing reader, not an AttributeError.
-    reader = getattr(getattr(args, "network", None), "reader", None)
-    if reader != "powsybl":
-        raise ValueError(
-            f"Dynamic simulations require network.reader='powsybl', "
-            f"got {reader!r}. Set 'reader: powsybl' in the network block.",
-        )
-
-    dyn = getattr(args, "dynamic", None)
-    if dyn is None:
-        raise ValueError(
-            "Config is missing the 'dynamic:' block. "
-            "Add a dynamic: section with at least dynamic_solver: 'dynawo'.",
-        )
-
-    dynamic_solver = getattr(dyn, "dynamic_solver", None)
-    if not dynamic_solver:
-        raise ValueError(
-            "Config is missing dynamic.dynamic_solver. "
-            "Set 'dynamic_solver: dynawo' in the dynamic block.",
-        )
-
-    # dynamic.output_dir used to be a second, independent output root, which split
-    # a single run's artifacts across two unrelated trees. Outputs are now rooted
-    # at settings.data_dir like the static pipeline. Fail loudly rather than
-    # silently ignore the key and write somewhere the user does not expect.
-    if getattr(dyn, "output_dir", None) is not None:
-        raise ValueError(
-            "dynamic.output_dir has been removed: dynamic outputs are now written "
-            "under settings.data_dir, in {data_dir}/{network.name}/raw/dynamic/. "
-            "Delete 'output_dir' from the dynamic block and set settings.data_dir "
-            "instead.",
-        )
-
-    # Without at least one scenario there is nothing to chunk: np.array_split would
-    # raise "number sections must be larger than 0" from inside numpy.
-    n_scenarios = getattr(getattr(args, "load", None), "scenarios", 0)
-    if not n_scenarios or n_scenarios < 1:
-        raise ValueError(
-            f"load.scenarios must be >= 1, got {n_scenarios!r}. "
-            "Set the number of load scenarios to generate.",
-        )
-
-    # Fail fast on a missing Dynawo installation. pypowsybl.dynamic imports fine
-    # without it, so otherwise the run only dies once the workers reach
-    # Simulation.run(), with an opaque provider-instantiation error.
-    if dynamic_solver == "dynawo":
-        from gridfm_datakit.dynamic.dynawo.api import check_dynawo_available
-
-        check_dynawo_available()
+    raise ValueError(
+        "events.start_time must be within dynamic.solver_parameters window "
+        f"[{start_time}, {stop_time}]; out-of-range row/value pairs: {invalid}",
+    )
 
 
 def _time_axis_seconds(curves: pd.DataFrame) -> np.ndarray:
