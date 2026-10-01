@@ -30,6 +30,8 @@ complete example in [Dynamic Simulation](dynamic_simulation.md) rather than
 adding the block directly to the static example below; both pipelines use the
 same `generate` command.
 
+To read the grid or solve the power flow with PowSyBl, see [PowSyBl](powsybl.md).
+
 Sample configuration files are provided in `scripts/config`, e.g. `default.yaml`:
 
 ```yaml
