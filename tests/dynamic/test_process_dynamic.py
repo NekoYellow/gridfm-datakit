@@ -9,17 +9,27 @@ import numpy as np
 import pytest
 from markers import needs_dynawo
 
+from gridfm_datakit.config import validate_dynamic_config
+from gridfm_datakit.dynamic import load_raw_inputs
+from gridfm_datakit.dynamic import process_dynamic as pdyn
 from gridfm_datakit.dynamic.dynawo import (
     generate_dynawo_mappings,
     get_dynawo_simulation_parameters,
 )
-from gridfm_datakit.dynamic import load_raw_inputs
-from gridfm_datakit.dynamic import process_dynamic as pdyn
-from gridfm_datakit.generate import _setup_environment, _prepare_network_and_scenarios
+from gridfm_datakit.generate import (
+    _prepare_network_and_scenarios,
+    _setup_generation_environment,
+)
 from gridfm_datakit.powsybl import load_net
 from gridfm_datakit.utils.param_handler import NestedNamespace
 
 # No module-level pytestmark: only the tests that simulate carry @needs_dynawo.
+
+
+def _setup_dynamic_environment(config: NestedNamespace):
+    """Validate and set up a dynamic config as the production entry point does."""
+    validated = validate_dynamic_config(config.to_dict())
+    return _setup_generation_environment(NestedNamespace(**validated))
 
 
 @needs_dynawo
@@ -29,7 +39,7 @@ def test_process_single_dynamic_simulation(config_ieee14):
 
     config = config_ieee14
 
-    args, _, _, _ = _setup_environment(config)
+    args, _, _, _ = _setup_dynamic_environment(config)
     dynamic_inputs = load_raw_inputs(args)
     dynawo_mappings = generate_dynawo_mappings(dynamic_inputs)
     simulation_parameters = get_dynawo_simulation_parameters(args)
@@ -71,7 +81,7 @@ def test_process_dynamic_simulation(config_ieee14):
 
     config = config_ieee14
 
-    args, _, file_paths, seed = _setup_environment(config)
+    args, _, file_paths, seed = _setup_dynamic_environment(config)
     gfm_net, scenarios, meta = _prepare_network_and_scenarios(args, file_paths, seed)
     dynamic_inputs = load_raw_inputs(args)
 

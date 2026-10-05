@@ -256,17 +256,6 @@ def test_setup_environment_rejects_unsupported_input_type() -> None:
         _setup_environment(["network"])
 
 
-def test_setup_environment_keeps_dynamic_schema_bypass(tmp_path: Path) -> None:
-    """Dynamic callers own validation and may pass their validated namespace."""
-    config = _default_config()
-    config["settings"]["data_dir"] = str(tmp_path / "data")
-    config["dynamic"] = {"entry_point_owns_validation": True}
-
-    args, _, _, _ = _setup_environment(config)
-
-    assert args.dynamic.entry_point_owns_validation is True
-
-
 @pytest.mark.parametrize(
     ("section", "config_type", "field"),
     [

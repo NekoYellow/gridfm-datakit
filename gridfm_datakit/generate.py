@@ -106,9 +106,6 @@ def _setup_environment(
 ) -> Tuple[NestedNamespace, str, Dict[str, str], int]:
     """Validate static input and set up the generation environment.
 
-    Dynamic callers retain the historical schema bypass here and must pass a
-    configuration they validated at their own entry point.
-
     Args:
         config: YAML path, dictionary, or nested namespace.
 
@@ -119,10 +116,7 @@ def _setup_environment(
         TypeError: If config is not a supported input form.
         ValueError: If a static configuration is invalid.
     """
-    config = _load_config(config)
-
-    if not config.get("dynamic"):
-        config = validate_static_config(config)
+    config = validate_static_config(_load_config(config))
     return _setup_generation_environment(NestedNamespace(**config))
 
 

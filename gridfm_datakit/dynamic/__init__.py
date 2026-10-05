@@ -19,7 +19,7 @@ from typing import Any
 
 import pandas as pd
 
-from gridfm_datakit.utils.param_handler import NestedNamespace
+from gridfm_datakit.utils.param_handler import NestedNamespace, parse_parameter_string
 
 
 # ---------------------------------------------------------------------------
@@ -292,35 +292,6 @@ _STRING_COLS = {
 }
 
 
-def _parse_parameter_string(params: str) -> dict[str, str]:
-    """Parse a flat dynamic-input parameter string.
-
-    Args:
-        params: Semicolon-separated ``key=value`` pairs. A trailing semicolon
-            is accepted, and values may themselves contain ``=``.
-
-    Returns:
-        Parameter values keyed by their names.
-
-    Raises:
-        ValueError: If a non-empty fragment is malformed, a key is empty, or a
-            key occurs more than once.
-    """
-    parsed = {}
-    for fragment in params.split(";"):
-        if fragment == "":
-            continue
-        if "=" not in fragment:
-            raise ValueError(f"parameter fragment {fragment!r} must use key=value")
-        key, value = fragment.split("=", 1)
-        if key == "":
-            raise ValueError("parameter keys must not be empty")
-        if key in parsed:
-            raise ValueError(f"parameter {key!r} is specified more than once")
-        parsed[key] = value
-    return parsed
-
-
 def _normalize_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     """Coerce ID/name columns to str and ``start_time`` to float in place.
 
@@ -350,11 +321,11 @@ def _check_non_empty_values(
     Raises:
         ValueError: If a required value is empty or contains only whitespace.
     """
-    empty_rows = {
-        column: df.index[df[column].str.strip().eq("")].tolist()
-        for column in sorted(columns)
-        if df[column].str.strip().eq("").any()
-    }
+    empty_rows = {}
+    for column in sorted(columns):
+        empty_mask = df[column].str.strip().eq("")
+        if empty_mask.any():
+            empty_rows[column] = df.index[empty_mask].tolist()
     if not empty_rows:
         return
 
@@ -479,7 +450,7 @@ def _validate_parameter_rows(
     for row_index, row in df.iterrows():
         kind = row[kind_column]
         try:
-            parsed = _parse_parameter_string(row["params"])
+            parsed = parse_parameter_string(row["params"])
         except ValueError as exc:
             raise ValueError(
                 f"{file_label} row {row_index!r} ({kind_column}={kind!r}): "

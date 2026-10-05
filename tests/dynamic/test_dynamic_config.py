@@ -45,6 +45,16 @@ def test_validate_dynamic_config_accepts_shipped_example() -> None:
     assert validated["settings"]["opf_formulation"] == "polar"
 
 
+def test_validate_dynamic_config_preserves_validate_alias() -> None:
+    config = _default_config()
+    config["dynamic"]["validate"] = True
+
+    validated = validate_dynamic_config(config)
+
+    assert validated["dynamic"]["validate"] is True
+    assert "run_validation" not in validated["dynamic"]
+
+
 def test_validate_dynamic_config_supplies_execution_and_perturbation_defaults() -> None:
     config = _default_config()
     del config["settings"]["num_processes"]

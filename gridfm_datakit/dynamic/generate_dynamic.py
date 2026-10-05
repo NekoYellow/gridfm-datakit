@@ -152,7 +152,7 @@ def generate_dynamic_data(
     config = _load_config(config)
     config = validate_dynamic_config(config)
     args = NestedNamespace(**config)
-    _check_dynamic_runtime(args)
+    _check_dynamic_runtime()
     _configure_logging(args)
 
     # Dynamic input tables are part of the run's configuration contract. Load
@@ -251,7 +251,7 @@ def _validate_outputs(args: NestedNamespace, file_paths: Dict[str, str]) -> None
     logger.info("Validation passed.")
 
 
-def _check_dynamic_runtime(args: NestedNamespace) -> None:
+def _check_dynamic_runtime() -> None:
     """Check runtime dependencies required by the validated dynamic backend."""
     # pypowsybl.dynamic imports without a Dynawo install, so otherwise a missing
     # installation only surfaces after worker processes have started.
