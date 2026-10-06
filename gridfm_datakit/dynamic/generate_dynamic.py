@@ -36,7 +36,7 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -102,6 +102,46 @@ def _configure_logging(config: NestedNamespace) -> None:
         logger.addHandler(handler)
 
 
+def _setup_environment(
+    config: Union[str, os.PathLike, Dict[str, Any], NestedNamespace],
+) -> Tuple[NestedNamespace, DynamicInputs, str, Dict[str, str], int]:
+    """Validate dynamic input and set up the generation environment.
+
+    All configuration and input-table checks run before the shared environment
+    setup can remove an existing output tree.
+
+    Args:
+        config: YAML path, dictionary, or nested namespace.
+
+    Returns:
+        Tuple of (args, dynamic_inputs, base_path, file_paths, seed).
+
+    Raises:
+        TypeError: If config is not a supported input form.
+        ValueError: If the configuration or dynamic input tables are invalid.
+        FileNotFoundError: If a configured dynamic input table does not exist.
+    """
+    validated = validate_dynamic_config(_load_config(config))
+    args = NestedNamespace(**validated)
+    _check_dynamic_runtime()
+    _configure_logging(args)
+
+    dynamic_inputs = load_raw_inputs(args)
+    _validate_event_time_window(args, dynamic_inputs)
+
+    args, base_path, file_paths, seed = _setup_generation_environment(args)
+    args.settings.solver_log_dir = file_paths["solver_log_dir"]
+
+    # Dynamic progress is logged by the pipeline logger rather than tqdm. Only
+    # remove this run's empty file after overwrite recreated the output tree;
+    # otherwise it may belong to an earlier static run sharing the base path.
+    tqdm_log = file_paths.pop("tqdm_log", None)
+    if tqdm_log is not None and getattr(args.settings, "overwrite", False):
+        Path(tqdm_log).unlink(missing_ok=True)
+
+    return args, dynamic_inputs, base_path, file_paths, seed
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -149,37 +189,8 @@ def generate_dynamic_data(
         If no sample survived, i.e. every scenario failed.
     """
 
-    # --- Step 1: load and validate config and input tables ---
-    config = _load_config(config)
-    config = validate_dynamic_config(config)
-    args = NestedNamespace(**config)
-    _check_dynamic_runtime()
-    _configure_logging(args)
-
-    # Dynamic input tables are part of the run's configuration contract. Load
-    # and validate them before environment setup can remove an existing output
-    # tree, so a missing file or malformed table is non-destructive.
-    dynamic_inputs = load_raw_inputs(args)
-    _validate_event_time_window(args, dynamic_inputs)
-
-    # --- Step 2: standard environment setup (reuse generate.py logic) ---
-    args, base_path, file_paths, seed = _setup_generation_environment(args)
-    # Environment setup derives solver_log_dir (honouring enable_solver_logs)
-    # into file_paths; publish it on settings so the distributed dynamic loop
-    # routes OPF + Dynawo native output to files instead of dropping it.
-    args.settings.solver_log_dir = file_paths["solver_log_dir"]
-
-    # The dynamic pipeline reports progress per chunk through the
-    # "gridfm_datakit.dynamic" logger, not tqdm, so the environment setup's
-    # tqdm.log stays empty and is not exported.
-    #
-    # It is only deleted when settings.overwrite is set: base_path has then just
-    # been wiped and recreated, so the file there is certainly ours. Otherwise
-    # base_path may be shared with an earlier *static* run whose accumulated
-    # tqdm.log must be left alone.
-    tqdm_log = file_paths.pop("tqdm_log", None)
-    if tqdm_log is not None and getattr(args.settings, "overwrite", False):
-        Path(tqdm_log).unlink(missing_ok=True)
+    # --- Steps 1 and 2: validate inputs and set up the environment ---
+    args, dynamic_inputs, base_path, file_paths, seed = _setup_environment(config)
 
     # --- Step 3: network + scenarios (reuse generate.py logic) ---
     # Only the scenarios and meta["network_path"] are used downstream: workers
