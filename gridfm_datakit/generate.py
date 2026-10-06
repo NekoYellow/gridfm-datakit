@@ -215,7 +215,7 @@ def _prepare_network_and_scenarios(
         Tuple of (network, scenarios)
     """
     meta = {}
-    reader = args.network.reader  # already validated in _setup_environment
+    reader = args.network.reader
 
     if args.network.source == "pglib":
         if reader == "powsybl":

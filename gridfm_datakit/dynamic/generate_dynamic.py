@@ -116,10 +116,11 @@ def generate_dynamic_data(
 
     Runs the full pipeline:
     1. Validate config and dynamic input tables.
-    2. Prepare network + load scenarios.
-    3. Prepare Dynawo mappings and solver parameters in each worker.
-    4. Run distributed dynamic simulations.
-    5. Save static (Parquet) + dynamic (Zarr) outputs.
+    2. Set up the generation environment.
+    3. Prepare network + load scenarios.
+    4. Configure the dynamic output location.
+    5. Prepare, simulate, and save each chunk.
+    6. Optionally validate the generated static snapshot.
 
     Args
     ----
@@ -148,7 +149,7 @@ def generate_dynamic_data(
         If no sample survived, i.e. every scenario failed.
     """
 
-    # --- Step 0: load and validate config ---
+    # --- Step 1: load and validate config and input tables ---
     config = _load_config(config)
     config = validate_dynamic_config(config)
     args = NestedNamespace(**config)
@@ -161,7 +162,7 @@ def generate_dynamic_data(
     dynamic_inputs = load_raw_inputs(args)
     _validate_event_time_window(args, dynamic_inputs)
 
-    # --- Step 1: standard environment setup (reuse generate.py logic) ---
+    # --- Step 2: standard environment setup (reuse generate.py logic) ---
     args, base_path, file_paths, seed = _setup_generation_environment(args)
     # Environment setup derives solver_log_dir (honouring enable_solver_logs)
     # into file_paths; publish it on settings so the distributed dynamic loop
@@ -180,12 +181,12 @@ def generate_dynamic_data(
     if tqdm_log is not None and getattr(args.settings, "overwrite", False):
         Path(tqdm_log).unlink(missing_ok=True)
 
-    # --- Step 2: network + scenarios (reuse generate.py logic) ---
+    # --- Step 3: network + scenarios (reuse generate.py logic) ---
     # Only the scenarios and meta["network_path"] are used downstream: workers
     # reload the network themselves from that path (see _process_dynamic_chunk).
     _, scenarios, meta = _prepare_network_and_scenarios(args, file_paths, seed)
 
-    # --- Step 3: output directory ---
+    # --- Step 4: dynamic output location ---
     # Single root: everything this run produces lives under settings.data_dir, in
     # the same base_path (data_dir/<network>/raw) the static pipeline uses for its
     # logs and scenarios. The dynamic artifacts go one level down, in dynamic/,
@@ -198,7 +199,7 @@ def generate_dynamic_data(
     dynamic_solver = args.dynamic.dynamic_solver
     output_dir = Path(base_path) / "dynamic"
 
-    # --- Steps 3 to 5: prepare, simulate, and save one chunk at a time ---
+    # --- Step 5: prepare, simulate, and save one chunk at a time ---
     # Each chunk is written and released before the next runs, so peak memory
     # tracks settings.large_chunk_size rather than the whole dataset. Dynamic
     # curves are far larger than static snapshots, which is why this streams
